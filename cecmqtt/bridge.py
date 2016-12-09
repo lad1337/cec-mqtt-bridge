@@ -188,76 +188,145 @@ def cleanup():
     if int(config['ir']['enabled']) == 1:
         lirc.deinit()
 
-
-try:
-    ### Parse config ###
+def old():
     try:
-        Config = ConfigParser.SafeConfigParser()
-        if not Config.read("config.ini"):
-            raise Exception('Could not load config.ini')
+        ### Parse config ###
+        try:
+            Config = ConfigParser.SafeConfigParser()
+            if not Config.read("config.ini"):
+                raise Exception('Could not load config.ini')
 
-        # Load all sections and overwrite default configuration
-        for section in Config.sections():
-            config[section].update(dict(Config.items(section)))
+            # Load all sections and overwrite default configuration
+            for section in Config.sections():
+                config[section].update(dict(Config.items(section)))
 
-        # Do some checks
-        if (not int(config['cec']['enabled']) == 1) and\
-                (not int(config['ir']['enabled']) == 1):
-            raise Exception('IR and CEC are both disabled. Can\'t continue.')
+            # Do some checks
+            if (not int(config['cec']['enabled']) == 1) and\
+                    (not int(config['ir']['enabled']) == 1):
+                raise Exception('IR and CEC are both disabled. Can\'t continue.')
 
-    except Exception, e:
-        print "ERROR: Could not configure:", str(e)
-        exit(1)
+        except Exception, e:
+            print "ERROR: Could not configure:", str(e)
+            exit(1)
 
-    ### Setup MQTT ###
-    print "Initialising MQTT..."
-    mqtt_client = mqtt.Client("cec-ir-mqtt")
+        ### Setup MQTT ###
+        print "Initialising MQTT..."
+        mqtt_client = mqtt.Client("cec-ir-mqtt")
+        mqtt_client.on_connect = mqqt_on_connect
+        mqtt_client.on_message = mqqt_on_message
+        if config['mqtt']['user']:
+            mqtt_client.username_pw_set(config['mqtt']['user'], password=config['mqtt']['password']);
+        mqtt_client.connect(config['mqtt']['broker'], config['mqtt']['port'], 60)
+        mqtt_client.loop_start()
+
+        ### Setup CEC ###
+        if int(config['cec']['enabled']) == 1:
+            import cec
+            print "Initialising CEC..."
+            try:
+                cec_config = cec.libcec_configuration()
+                cec_config.strDeviceName = "cec-ir-mqtt"
+                cec_config.bActivateSource = 0
+                cec_config.deviceTypes.Add(cec.CEC_DEVICE_TYPE_RECORDING_DEVICE)
+                cec_config.clientVersion = cec.LIBCEC_VERSION_CURRENT
+                cec_config.SetLogCallback(cec_on_message)
+                cec_client = cec.ICECAdapter.Create(cec_config)
+                if not cec_client.Open(config['cec']['port']):
+                    raise Exception("Could not connect to cec adapter")
+            except Exception, e:
+                print "ERROR: Could not initialise CEC:", str(e)
+                exit(1)
+
+        ### Setup IR ###
+        if int(config['ir']['enabled']) == 1:
+            import lirc
+            print "Initialising IR..."
+            try:
+                lirc.init("cec-ir-mqtt", "lircrc", blocking=False)
+                lirc_thread = threading.Thread(target=ir_listen_thread)
+                lirc_thread.start()
+
+            except Exception, e:
+                print "ERROR: Could not initialise IR:", str(e)
+                exit(1)
+
+        print "Starting main loop..."
+        while True:
+            if int(config['cec']['enabled']) == 1:
+                cec_refresh()
+            time.sleep(10)
+
+    except (KeyboardInterrupt):
+        cleanup()
+
+    except (RuntimeError):
+        cleanup()
+
+import logging
+import signal
+import time
+
+import anyconfig
+from attrdict import AttrDict
+import click
+from pkg_resources import resource_filename
+
+from cecmqtt.version import __version__
+from cecmqtt.cec_client import CECClient
+
+FORMAT = '%(asctime)s: %(levelname)-8s %(name)-15s: %(message)s'
+logging.basicConfig(format=FORMAT, level=logging.DEBUG)
+logger = logging.getLogger(__name__)
+
+
+RUN = True
+
+
+def stop(signum, frame):
+    global RUN
+    RUN = False
+
+
+def loop(cec_client):
+    while RUN:
+        devices = cec_client.scan()
+        for id_, device in devices.items():
+            logger.debug("device(%s) '%s' is %s", id_, device['osd_name'],  device['power_status'])
+        logger.debug('sleeping...')
+        time.sleep(10)
+    logger.info("Exiting")
+
+
+def setup(configuration):
+    cec_client = CECClient(osd_name=configuration.name, port=configuration.cec.port)
+    mqtt_client = mqtt.Client(configuration.name)
     mqtt_client.on_connect = mqqt_on_connect
     mqtt_client.on_message = mqqt_on_message
-    if config['mqtt']['user']:
-        mqtt_client.username_pw_set(config['mqtt']['user'], password=config['mqtt']['password']);
-    mqtt_client.connect(config['mqtt']['broker'], config['mqtt']['port'], 60)
+
+    if configuration.mqtt.username:
+        mqtt_client.username_pw_set(configuration.mqtt.username, configuration.mqtt.username)
+    mqtt_client.connect(configuration.mqtt.host, configuration.mqtt.port, 60)
     mqtt_client.loop_start()
+    return cec_client, mqtt_client
 
-    ### Setup CEC ###
-    if int(config['cec']['enabled']) == 1:
-        import cec
-        print "Initialising CEC..."
-        try:
-            cec_config = cec.libcec_configuration()
-            cec_config.strDeviceName = "cec-ir-mqtt"
-            cec_config.bActivateSource = 0
-            cec_config.deviceTypes.Add(cec.CEC_DEVICE_TYPE_RECORDING_DEVICE)
-            cec_config.clientVersion = cec.LIBCEC_VERSION_CURRENT
-            cec_config.SetLogCallback(cec_on_message)
-            cec_client = cec.ICECAdapter.Create(cec_config)
-            if not cec_client.Open(config['cec']['port']):
-                raise Exception("Could not connect to cec adapter")
-        except Exception, e:
-            print "ERROR: Could not initialise CEC:", str(e)
-            exit(1)
 
-    ### Setup IR ###
-    if int(config['ir']['enabled']) == 1:
-        import lirc
-        print "Initialising IR..."
-        try:
-            lirc.init("cec-ir-mqtt", "lircrc", blocking=False)
-            lirc_thread = threading.Thread(target=ir_listen_thread)
-            lirc_thread.start()
-
-        except Exception, e:
-            print "ERROR: Could not initialise IR:", str(e)
-            exit(1)
-
-    print "Starting main loop..."
-    while True:
-        if int(config['cec']['enabled']) == 1:
-            cec_refresh()
-        time.sleep(10)
-
-except (KeyboardInterrupt):
-    cleanup()
-
-except (RuntimeError):
-    cleanup()
+@click.version_option(__version__)
+@click.command()
+@click.option(
+    '--config', '-c', default='/etc/cec-mqtt-bridge/config.yaml', help='Config file path', type=click.Path())
+def main(config):
+    signal.signal(signal.SIGINT, stop)
+    default_configuration = anyconfig.load(resource_filename('cecmqtt.config', 'default.yaml'))
+    try:
+        configuration = anyconfig.load(config)
+    except IOError:
+        logger.warning("no config file found at: %s", config)
+        configuration = {}
+    configuration = default_configuration + AttrDict(configuration)
+    logger.debug("%s", configuration)
+    cec_client, mqtt_client = setup(configuration)
+    try:
+        loop(cec_client)
+    finally:
+        logger.debug("disconecting mqtt")
+        mqtt_client.disconnect()

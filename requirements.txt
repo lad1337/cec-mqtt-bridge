@@ -1,2 +1,6 @@
-python-lirc==1.2.1
 paho-mqtt==1.2
+anyconfig==0.7.0
+click==6.6
+PyYAML==3.12
+attrdict==2.0.0
+pkginfo==1.4.1
