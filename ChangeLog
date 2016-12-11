@@ -1,0 +1,9 @@
+CHANGES
+=======
+
+* first step of refactoring
+* Send username and password when connecting
+* Add LIRC support. Cleaned up code. Added config file
+* Improve detection of devices
+* Add README.md
+* Initial commit

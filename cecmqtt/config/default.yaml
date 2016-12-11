@@ -1,10 +1,11 @@
-name: CEC MQTT Bridge
+name: CEC MQTT
 mqtt:
   host: localhost
   port: 8883
   username:
   password:
-  topic_prefix: media
+  topic_set_prefix: cec/set
+  topic_status_prefix: cec/status
 cec:
   id: 1
   port:

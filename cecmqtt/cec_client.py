@@ -9,7 +9,7 @@ except ImportError:
     cec = MagicMock()
 
 
-class PowerStatus:
+class PowerStatus(object):
 
     def __init__(self, power_on):
         self.power_on = power_on
@@ -25,9 +25,6 @@ class PowerStatus:
     def __bool__(self):
         return self.power_on
 
-
-def sanitize_name(name):
-    return name.replace(" ", "_").replace("/", "_").replace("(", "").replace(")", "").lower()
 
 
 BUTTONS = [
@@ -51,27 +48,24 @@ BUTTONS = [
 ]
 
 BUTTON_CODES = {"{code:x}".format(code=i): name for i, name in enumerate(BUTTONS)}
-BUTTON_NAMES = {sanitize_name(name): code for code, name in BUTTON_CODES.items()}
-del sanitize_name
+BUTTON_NAMES = {name: code for code, name in BUTTON_CODES.items()}
 
 
-class CECClient:
+class CECClient(object):
 
-    def __init__(self, osd_name=None, device_types=None, init=True, key_press_callback=None,
-                 log_callback=None, port=None):
+    def __init__(self, osd_name='pyCecClient', device_types=None, connect=True,
+                 key_press_callback=None, log_callback=None, port=None):
         self.logger = logging.getLogger('CECClient')
+        self.logger_log = logging.getLogger('CECClient.log')
+        self.logger_key = logging.getLogger('CECClient.key')
 
         self.cecconfig = cec.libcec_configuration()
-        self.cecconfig.strDeviceName = osd_name or "pyCecClient"
+        if osd_name is not None:
+            assert len(osd_name) < 14, "Maximum length for cec device name is 14"
+        self.cecconfig.strDeviceName = osd_name
         self.cecconfig.bActivateSource = 0
         self.cecconfig.clientVersion = cec.LIBCEC_VERSION_CURRENT
-
-        # FIXME: this does not work at all
-        if log_callback is not None:
-            self.cecconfig.SetLogCallback(log_callback)
-        if key_press_callback is not None:
-            self.cecconfig.SetKeyPressCallback(key_press_callback)
-
+        self._setup_callbacks(log_callback, key_press_callback)
         if device_types:
             for device_type in device_types:
                 self.cecconfig.deviceTypes.Add(device_type)
@@ -82,10 +76,25 @@ class CECClient:
         self._logical_address = None
         self._devices = None
         self.port = port
-        if init:
-            self.init()
+        if connect:
+            self.connect()
 
-    def init(self):
+    def _setup_callbacks(self, log_callback, key_press_callback):
+        if log_callback is not None:
+            self.log_callback = log_callback
+        if key_press_callback is not None:
+            self.key_press_callback = key_press_callback
+
+        def log_callback_proxy(level, time, message):
+            if level == cec.CEC_LOG_TRAFFIC:
+                self.log_handler(level, time, message)
+        self.cecconfig.SetLogCallback(log_callback_proxy)
+
+        def key_callback_proxy(button, duration):
+            self.key_handler(button, duration)
+        self.cecconfig.SetKeyPressCallback(key_callback_proxy)
+
+    def connect(self):
         self._logical_address = None
         adapters = self.connection.DetectAdapters()
         if not adapters:
@@ -93,7 +102,13 @@ class CECClient:
         if self.port is None:
             self.port = adapters[0].strComName
         self.connected = self.connection.Open(self.port)
-        self.logger.info("connectd to: %s", self.port)
+        self.logger.info("connected to: %s", self.port)
+
+    def log_handler(self, level, time, message):
+        self.logger_log.debug("%s - %s - %s", level, time, message)
+
+    def key_handler(self, button, duration):
+        self.logger_key.debug("%s - %s", button, duration)
 
     @property
     def logical_address(self):
@@ -122,7 +137,7 @@ class CECClient:
           if addresses.IsSet(x):
             devices[x] = {
                 'vendor_id': self.connection.GetDeviceVendorId(x),
-                #'physical_address': int(str(self.connection.GetDevicePhysicalAddress(x))),
+                'physical_address': int(str(self.connection.GetDevicePhysicalAddress(x))),
                 'logical_address': x,
                 'active': self.connection.IsActiveSource(x),
                 'cec_version': self.connection.GetDeviceCecVersion(x),
@@ -152,10 +167,15 @@ class CECClient:
     def button_select(self, dst, release=True):
         return self.button_press("44", dst, release)
 
-    def standby(self, src=None, dst=None):
+    def standby(self, dst=None, src=None):
         src = src or self.logical_address
         dst = dst or 0
         return self.raw_command('{src:x}{dst:x}:36'.format(src=src, dst=dst))
+
+    def on(self, dst, src=None):
+        src = src or self.logical_address
+        button_code = BUTTON_NAMES["Power On Function"]
+        return self.button_press(button_code, dst, src)
 
     def active_source(self, logical_address=None, physical_address=None):
         if logical_address is None and physical_address is None:
@@ -167,3 +187,9 @@ class CECClient:
 
     def power_status(self, dst):
         return PowerStatus(self.connection.GetDevicePowerStatus(dst) == 0)
+
+    def volume_up(self):
+        self.connection.VolumeUp()
+
+    def volume_down(self):
+        self.connection.VolumeDown()
